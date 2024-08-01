@@ -1,0 +1,89 @@
+# Funzione per generare un certificato self-signed
+generate_self_signed_cert() {
+  # Verifica che tutti i parametri obbligatori siano stati forniti
+  if [ $# -ne 3 ]; then
+    echo "Usage: generate_self_signed_cert <certificatename> <certificatedns> <certificatepassword>"
+    return 1
+  fi
+
+  local certificatename=$1
+  local certificatedns=$2
+  local certificatepassword=$3
+
+  # Imposta variabili
+  local tmpPath="."
+  local pfxFilePath="$tmpPath/$certificatename.pfx"
+  local cerFilePath="$tmpPath/$certificatename.cer"
+  local pemFilePath="$tmpPath/certificate.pem"
+  local keyFilePath="$tmpPath/private.key"
+  local days=730 # 2 anni
+
+  # Genera chiave privata
+  openssl genrsa -out "$tmpPath/$certificatename.key" 2048
+
+  # Crea file di configurazione OpenSSL per il certificato
+  local openssl_cnf="$tmpPath/openssl.cnf"
+  cat > $openssl_cnf <<EOL
+[req]
+default_bits        = 2048
+distinguished_name  = req_distinguished_name
+req_extensions      = req_ext
+x509_extensions     = v3_ca
+
+[req_distinguished_name]
+countryName                 = Country Name (2 letter code)
+countryName_default         = IT
+stateOrProvinceName         = State or Province Name (full name)
+stateOrProvinceName_default = State
+localityName                = Locality Name (eg, city)
+localityName_default        = Locality
+organizationName            = Organization Name (eg, company)
+organizationName_default    = Organization
+commonName                  = Common Name (e.g. server FQDN or YOUR name)
+commonName_default          = $certificatename
+
+[req_ext]
+subjectAltName = @alt_names
+
+[v3_ca]
+subjectAltName = @alt_names
+keyUsage = critical, digitalSignature, keyEncipherment, dataEncipherment
+extendedKeyUsage = serverAuth
+
+[alt_names]
+EOL
+
+  # Aggiungi i DNS al file di configurazione
+  local dns_index=1
+  for dns in ${(s/,/)certificatedns}; do
+    echo "DNS.$dns_index = $dns" >> $openssl_cnf
+    ((dns_index++))
+  done
+
+  # Genera il certificato self-signed
+  openssl req -x509 -new -nodes -key "$tmpPath/$certificatename.key" -sha256 -days $days -out "$tmpPath/$certificatename.crt" -config $openssl_cnf
+
+  # Esporta il certificato in formato PFX
+  openssl pkcs12 -export -out "$pfxFilePath" -inkey "$tmpPath/$certificatename.key" -in "$tmpPath/$certificatename.crt" -password pass:"$certificatepassword"
+
+  # Esporta il certificato in formato CER
+  cp "$tmpPath/$certificatename.crt" "$cerFilePath"
+
+  # Genera file PEM e chiave privata per Apache/Nginx
+  openssl pkcs12 -in "$pfxFilePath" -clcerts -nokeys -out "$pemFilePath" -password pass:"$certificatepassword"
+  openssl pkcs12 -in "$pfxFilePath" -nocerts -nodes -out "$keyFilePath" -password pass:"$certificatepassword"
+
+  # Importa il certificato nel portachiavi del sistema
+  sudo security import "$pfxFilePath" -k /Library/Keychains/System.keychain -P "$certificatepassword" -T /usr/bin/codesign
+
+  # Aggiungi il certificato ai certificati fidati
+  sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain "$cerFilePath"
+
+  # Rimuove i file temporanei se necessario
+  # rm "$cerFilePath"
+
+  echo "Certificato creato con successo: $certificatename"
+}
+
+# Esportare la funzione per l'uso nella shell
+export -f generate_self_signed_cert
